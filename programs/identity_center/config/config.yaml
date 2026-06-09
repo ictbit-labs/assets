@@ -1,0 +1,7 @@
+region: eu-west-1
+
+identity_store_id: ""
+
+sso_instance_arn: ""
+
+groups: []
