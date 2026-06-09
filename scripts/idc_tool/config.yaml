@@ -1,0 +1,4 @@
+region: eu-west-1
+profile: admin-sso
+identity_store_id: d-xxxxxxxxxx
+sso_instance_arn: arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
