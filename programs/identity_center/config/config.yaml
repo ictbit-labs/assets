@@ -13,5 +13,14 @@ groups: []
 # groups:
 #   - name: Developers
 #     description: Developer access group
+#     members:
+#       - username: john.doe
+#       - email: jane@example.com
+#       - user_id: abc123
+#     assignments:
+#       - account_id: "111122223333"
+#         permission_set_name: ReadOnlyAccess
+#       - account_id: "444455556666"
+#         permission_set_arn: arn:aws:sso:::permissionSet/ssoins-xxx/ps-xxx
 #   - name: SecurityAdmins
 #     description: Security administrators group
