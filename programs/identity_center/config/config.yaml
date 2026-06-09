@@ -1,7 +1,11 @@
+aws_profile: admin-sso
+
+expected_account_id: "123456789012"
+
 region: eu-west-1
 
-identity_store_id: ""
+identity_store_id: d-xxxxxxxxxx
 
-sso_instance_arn: ""
+sso_instance_arn: arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
 
 groups: []

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import aws_cdk as cdk
+from aws_cdk import CfnOutput
 from constructs import Construct
 
 if TYPE_CHECKING:
@@ -13,6 +15,13 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger("identity_center.stacks.groups")
+
+
+def sanitize_output_part(value: object, fallback: str) -> str:
+    """Convert a value into a CloudFormation logical ID compatible part."""
+
+    sanitized = "".join(part[:1].upper() + part[1:] for part in re.findall(r"[A-Za-z0-9]+", str(value)))
+    return sanitized or fallback
 
 
 class IdentityCenterGroupsStack(cdk.Stack):
@@ -68,4 +77,116 @@ class IdentityCenterGroupsStack(cdk.Stack):
                 "identity_store_group_memberships": len(self.identity_store_group_memberships),
                 "permission_set_assignments": len(self.permission_set_assignments),
             },
+        )
+
+    def add_group_outputs(
+        self,
+        *,
+        group_name: str,
+        group_id: str,
+        identity_store_id: str | None = None,
+    ) -> None:
+        """Expose CloudFormation outputs for a created Identity Store group."""
+
+        base_name = f"IdentityCenter{sanitize_output_part(group_name, 'Group')}"
+        resolved_identity_store_id = identity_store_id or self.config.identity_store_id
+
+        self._add_output(
+            f"{base_name}GroupName",
+            value=group_name,
+            description=f"Identity Store group name for {group_name}",
+        )
+        self._add_output(
+            f"{base_name}GroupId",
+            value=group_id,
+            description=f"Identity Store group ID for {group_name}",
+        )
+        self._add_output(
+            f"{base_name}IdentityStoreId",
+            value=resolved_identity_store_id,
+            description=f"Identity Store ID for {group_name}",
+        )
+
+    def add_group_membership_outputs(
+        self,
+        *,
+        group_name: str,
+        group_id: str,
+        user_id: str,
+        membership_id: str,
+        user_name: str | None = None,
+    ) -> None:
+        """Expose CloudFormation outputs for a created group membership."""
+
+        group_part = sanitize_output_part(group_name, "Group")
+        user_part = sanitize_output_part(user_name or user_id, "User")
+        base_name = f"IdentityCenter{group_part}Membership{user_part}"
+
+        self._add_output(
+            f"{base_name}GroupName",
+            value=group_name,
+            description=f"Identity Store group name for {group_name} membership",
+        )
+        self._add_output(
+            f"{base_name}GroupId",
+            value=group_id,
+            description=f"Identity Store group ID for {group_name} membership",
+        )
+        self._add_output(
+            f"{base_name}UserId",
+            value=user_id,
+            description=f"Identity Store user ID for {group_name} membership",
+        )
+        self._add_output(
+            f"{base_name}MembershipId",
+            value=membership_id,
+            description="Identity Store group membership ID",
+        )
+
+    def add_account_assignment_outputs(
+        self,
+        *,
+        principal_type: str,
+        principal_id: str,
+        permission_set_arn: str,
+        account_id: str,
+        group_name: str | None = None,
+        permission_set_name: str | None = None,
+    ) -> None:
+        """Expose CloudFormation outputs for a created account assignment."""
+
+        principal_part = sanitize_output_part(group_name or principal_id, "Principal")
+        permission_set_part = sanitize_output_part(permission_set_name or permission_set_arn, "PermissionSet")
+        account_part = sanitize_output_part(account_id, "Account")
+        base_name = f"IdentityCenter{principal_part}Assignment{permission_set_part}Account{account_part}"
+
+        self._add_output(
+            f"{base_name}PrincipalType",
+            value=principal_type,
+            description="Identity Center account assignment principal type",
+        )
+        self._add_output(
+            f"{base_name}PrincipalId",
+            value=principal_id,
+            description="Identity Center account assignment principal ID",
+        )
+        self._add_output(
+            f"{base_name}PermissionSetArn",
+            value=permission_set_arn,
+            description="Identity Center account assignment permission set ARN",
+        )
+        self._add_output(
+            f"{base_name}AccountId",
+            value=account_id,
+            description="Identity Center account assignment AWS account ID",
+        )
+
+    def _add_output(self, logical_id: str, *, value: str, description: str) -> None:
+        """Create a CloudFormation output with a sanitized logical ID."""
+
+        CfnOutput(
+            self,
+            sanitize_output_part(logical_id, "IdentityCenterOutput"),
+            value=str(value),
+            description=description,
         )
