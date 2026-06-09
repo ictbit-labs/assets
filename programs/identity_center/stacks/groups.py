@@ -7,11 +7,12 @@ import re
 from typing import TYPE_CHECKING
 
 import aws_cdk as cdk
-from aws_cdk import CfnOutput
+from aws_cdk import CfnOutput, RemovalPolicy
+from aws_cdk import aws_identitystore as identitystore
 from constructs import Construct
 
 if TYPE_CHECKING:
-    from app import IdentityCenterConfig
+    from app import IdentityCenterConfig, ResolvedGroupConfig
 
 
 LOGGER = logging.getLogger("identity_center.stacks.groups")
@@ -20,17 +21,14 @@ LOGGER = logging.getLogger("identity_center.stacks.groups")
 def sanitize_output_part(value: object, fallback: str) -> str:
     """Convert a value into a CloudFormation logical ID compatible part."""
 
-    sanitized = "".join(part[:1].upper() + part[1:] for part in re.findall(r"[A-Za-z0-9]+", str(value)))
+    sanitized = "".join(
+        part[:1].upper() + part[1:] for part in re.findall(r"[A-Za-z0-9]+", str(value))
+    )
     return sanitized or fallback
 
 
 class IdentityCenterGroupsStack(cdk.Stack):
-    """Initial Identity Center stack scaffold.
-
-    This stack intentionally creates no Identity Center resources yet. Future
-    tasks will add Identity Store groups, group memberships, permission sets,
-    and account assignments here.
-    """
+    """Identity Center group stack."""
 
     def __init__(
         self,
@@ -64,11 +62,15 @@ class IdentityCenterGroupsStack(cdk.Stack):
         )
 
     def _prepare_future_resources(self) -> None:
-        """Reserve extension points for future Identity Center resources."""
+        """Create or reference groups and reserve future resource extension points."""
 
-        self.identity_store_groups: list[Construct] = []
+        self.identity_store_groups: list[identitystore.CfnGroup] = []
         self.identity_store_group_memberships: list[Construct] = []
         self.permission_set_assignments: list[Construct] = []
+        self.group_ids_by_name: dict[str, str] = {}
+
+        for group in self.config.groups:
+            self._create_or_reference_group(group)
 
         LOGGER.info(
             "Resource preparation complete",
@@ -79,11 +81,59 @@ class IdentityCenterGroupsStack(cdk.Stack):
             },
         )
 
+    def _create_or_reference_group(self, group: "ResolvedGroupConfig") -> None:
+        """Create new groups and reference existing groups resolved by app.py."""
+
+        group_source = getattr(group, "source", "")
+        if group_source == "created":
+            group_id = self._create_group(group)
+        elif group_source == "existing":
+            group_id = str(group.group_id or "")
+            LOGGER.info(
+                "Referencing existing Identity Center group",
+                extra={"group_name": group.name, "group_id": group_id},
+            )
+        else:
+            raise ValueError(f"Group '{group.name}' was not resolved before stack creation")
+
+        if not group_id:
+            raise ValueError(f"Group '{group.name}' does not have a usable group ID")
+
+        self.group_ids_by_name[group.name] = group_id
+        self.add_group_outputs(
+            group_name=group.name,
+            group_id=group_id,
+            group_source=group_source,
+            identity_store_id=self.config.identity_store_id,
+        )
+
+    def _create_group(self, group: "ResolvedGroupConfig") -> str:
+        """Create an Identity Store group with CloudFormation."""
+
+        resource_id = f"{sanitize_output_part(group.name, 'Group')}Group"
+        group_properties: dict[str, str] = {
+            "display_name": group.name,
+            "identity_store_id": self.config.identity_store_id,
+        }
+        if group.description:
+            group_properties["description"] = group.description
+
+        cfn_group = identitystore.CfnGroup(
+            self,
+            resource_id,
+            **group_properties,
+        )
+        cfn_group.apply_removal_policy(RemovalPolicy.RETAIN)
+        self.identity_store_groups.append(cfn_group)
+        LOGGER.info("Creating Identity Center group", extra={"group_name": group.name})
+        return cfn_group.attr_group_id
+
     def add_group_outputs(
         self,
         *,
         group_name: str,
         group_id: str,
+        group_source: str,
         identity_store_id: str | None = None,
     ) -> None:
         """Expose CloudFormation outputs for a created Identity Store group."""
@@ -100,6 +150,11 @@ class IdentityCenterGroupsStack(cdk.Stack):
             f"{base_name}GroupId",
             value=group_id,
             description=f"Identity Store group ID for {group_name}",
+        )
+        self._add_output(
+            f"{base_name}GroupSource",
+            value=group_source,
+            description=f"Identity Store group source for {group_name}",
         )
         self._add_output(
             f"{base_name}IdentityStoreId",

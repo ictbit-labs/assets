@@ -9,3 +9,9 @@ identity_store_id: d-xxxxxxxxxx
 sso_instance_arn: arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
 
 groups: []
+# Example:
+# groups:
+#   - name: Developers
+#     description: Developer access group
+#   - name: SecurityAdmins
+#     description: Security administrators group
