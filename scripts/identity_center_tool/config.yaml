@@ -1,0 +1,5 @@
+region: eu-west-1
+profile: my-local-profile
+identity_store_id: d-xxxxxxxxxx
+# Optional. If omitted, the tool discovers it with sso-admin list-instances.
+# sso_instance_arn: arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
