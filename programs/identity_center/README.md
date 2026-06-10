@@ -81,6 +81,129 @@ Assignment rules:
 
 Duplicate group names, duplicate members within a group, duplicate assignments within a group, and unsupported fields fail validation before synthesis.
 
+## Examples
+
+Use these as separate patterns. Do not combine them until you are ready to manage all of the listed groups, memberships, and assignments in one deployment.
+
+### Example 1: Create One Group
+
+If the group display name does not already exist in the configured Identity Store, the stack creates it.
+
+```yaml
+groups:
+  - name: Developers
+    description: Developer access group
+```
+
+### Example 2: Create Multiple Groups
+
+Each group is resolved independently. Missing groups are created; existing groups with the same display name are referenced.
+
+```yaml
+groups:
+  - name: Developers
+    description: Developer access group
+
+  - name: SecurityAdmins
+    description: Security administrators group
+
+  - name: FinanceReadOnly
+    description: Finance read-only access group
+```
+
+### Example 3: Create A Group And Add Users
+
+Users must already exist in Identity Store. The app can resolve users by `username`, `email`, or `user_id`.
+
+```yaml
+groups:
+  - name: Developers
+    description: Developer access group
+    members:
+      - username: john.doe
+      - email: jane@example.com
+      - user_id: 12345678-90ab-cdef-1234-567890abcdef
+```
+
+### Example 4: Add Users To An Existing Group
+
+There is no separate import block. Declare the existing group by its exact Identity Center display name. If exactly one group named `Developers` already exists, the stack references it and creates only missing memberships.
+
+```yaml
+groups:
+  - name: Developers
+    description: Existing developer access group
+    members:
+      - username: john.doe
+      - email: jane@example.com
+```
+
+### Example 5: Create A Group And Assign A Permission Set
+
+The target AWS account and permission set must already exist. Use `permission_set_name` when the name is unique.
+
+```yaml
+groups:
+  - name: FinanceReadOnly
+    description: Finance read-only access group
+    assignments:
+      - account_id: "111122223333"
+        permission_set_name: ReadOnlyAccess
+```
+
+### Example 6: Assign A Permission Set To An Existing Group
+
+Declare the existing group by exact display name and add the desired account assignment. If the assignment already exists, the stack references it; if it is missing, the stack creates it.
+
+```yaml
+groups:
+  - name: SecurityAdmins
+    description: Existing security administrators group
+    assignments:
+      - account_id: "111122223333"
+        permission_set_name: SecurityAudit
+```
+
+### Example 7: Use A Permission Set ARN
+
+Use `permission_set_arn` when you want to avoid name lookup or when names could be ambiguous.
+
+```yaml
+groups:
+  - name: PlatformAdmins
+    description: Platform administrator access group
+    assignments:
+      - account_id: "111122223333"
+        permission_set_arn: arn:aws:sso:::permissionSet/ssoins-xxxxxxxxxxxxxxxx/ps-xxxxxxxxxxxxxxxx
+```
+
+### Example 8: Add Users And Assign Access
+
+This creates or references the group, creates any missing memberships, and creates any missing assignments.
+
+```yaml
+groups:
+  - name: Developers
+    description: Developer access group
+    members:
+      - username: john.doe
+      - email: jane@example.com
+    assignments:
+      - account_id: "111122223333"
+        permission_set_name: ReadOnlyAccess
+      - account_id: "444455556666"
+        permission_set_name: PowerUserAccess
+```
+
+### Supported Options
+
+- Groups are resolved only by exact display `name`; `group_id` and explicit import modes are not supported.
+- Members can be declared by exactly one of `username`, `email`, or `user_id`.
+- Assignments can resolve permission sets by exactly one of `permission_set_name` or `permission_set_arn`.
+- Empty groups are allowed.
+- Empty `members` or `assignments` lists are allowed.
+- Existing groups, memberships, and assignments are referenced when they already match the desired config.
+
 ## Context Overrides
 
 Values in `config/config.yaml` can be overridden with CDK context:
