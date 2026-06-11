@@ -1,0 +1,158 @@
+# Bypassing PrivateLink for AWS Service Console/API Access
+
+## Purpose
+
+This guide describes the general process for bypassing a specific AWS service VPC Endpoint/PrivateLink path when the AWS Console or browser-based workflow requires access to the public AWS service endpoint.
+
+This pattern was used for IAM Identity Center / Identity Store where browser requests to `identitystore.<region>.amazonaws.com` through PrivateLink returned:
+
+```json
+{
+  "message": "PrivateLink auth is not supported"
+}
+```
+
+## When To Use This Pattern
+
+Use this approach only when:
+
+* The service works through public AWS endpoints.
+* The service fails through VPCE/PrivateLink.
+* The failure is specific to the private path.
+* Security architecture allows controlled outbound access to AWS public FQDNs.
+* The change is approved by the cloud/security/network architecture team.
+
+## High-Level Flow
+
+```text
+Before:
+
+Client / Jumpbox
+  ↓
+Private DNS / Route 53 Private Hosted Zone
+  ↓
+Service VPCE
+  ↓
+AWS Service
+  ↓
+Failure
+
+After:
+
+Client / Jumpbox
+  ↓
+Public DNS resolution
+  ↓
+NFW / Proxy / Controlled Egress
+  ↓
+AWS Public Service Endpoint
+  ↓
+Success
+```
+
+## Required Changes
+
+### 1. Remove the Service VPCE
+
+Delete the specific VPC Endpoint for the affected AWS service.
+
+Example:
+
+```text
+com.amazonaws.<region>.identitystore
+```
+
+Do not remove unrelated VPC Endpoints.
+
+### 2. Remove the Route 53 Private Hosted Zone
+
+If a dedicated Private Hosted Zone exists for the service FQDN, remove it or remove its VPC association.
+
+Example:
+
+```text
+identitystore.<region>.amazonaws.com
+```
+
+Important:
+
+Deleting only the DNS record is not enough.
+
+If the Private Hosted Zone remains associated with the VPC, Route 53 Resolver may continue intercepting the query and prevent fallback to public DNS.
+
+### 3. Validate Public DNS Resolution
+
+From the client or jumpbox:
+
+```bash
+nslookup identitystore.<region>.amazonaws.com
+```
+
+Expected result:
+
+```text
+Public AWS IP addresses
+```
+
+Not expected:
+
+```text
+Private RFC1918 IPs
+No internal type for A/AAAA records
+NXDOMAIN from internal resolver
+```
+
+### 4. Allow Controlled Outbound Access
+
+Ensure the network firewall, proxy, or egress control allows HTTPS outbound access to the required AWS service FQDN.
+
+Example:
+
+```text
+identitystore.<region>.amazonaws.com:443
+```
+
+Use FQDN-based allow rules where possible.
+
+### 5. Test Connectivity
+
+```bash
+curl -I https://identitystore.<region>.amazonaws.com
+```
+
+A service-level response is acceptable.
+
+DNS failure or TCP timeout indicates the bypass path is not ready.
+
+### 6. Test Application / Console Flow
+
+Retest the original AWS Console or application workflow.
+
+For IAM Identity Center Users/Groups, verify that browser requests to:
+
+```text
+https://identitystore.<region>.amazonaws.com/identitystore
+```
+
+return success instead of:
+
+```text
+PrivateLink auth is not supported
+```
+
+## Rollback
+
+To restore the PrivateLink path:
+
+1. Recreate the service VPCE.
+2. Recreate or re-associate the Route 53 Private Hosted Zone.
+3. Recreate DNS records pointing the service FQDN to the VPCE DNS name.
+4. Validate that the service FQDN resolves to private VPCE IPs.
+
+## Important Notes
+
+* Do not remove shared hosted zones or shared VPCEs without validating their dependencies.
+* Prefer removing only the affected service path.
+* Keep changes scoped and reversible.
+* Public endpoint access must be controlled through NFW, proxy, or an equivalent approved egress mechanism.
+* Document every exception, including the FQDN, reason, approval, and rollback steps.
