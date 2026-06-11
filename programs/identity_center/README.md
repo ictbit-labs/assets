@@ -11,12 +11,17 @@ The app is intentionally scoped to Identity Center access wiring:
 - It references existing matching groups, memberships, and assignments instead of recreating them.
 - It keeps CloudFormation-created memberships and assignments in the template until they are removed from `config/config.yaml`.
 
+State model:
+
+- `config/config.yaml` is the desired state.
+- CloudFormation stack resources are the ownership state.
+- AWS Identity Center is the actual state.
+
 ## Files
 
 - `app.py` loads and validates configuration, validates the selected AWS account with STS, resolves Identity Center resources, and synthesizes the stack.
 - `stacks/groups.py` defines the CloudFormation resources and outputs.
 - `config/config.yaml` is the default deployment configuration.
-- `state.json` is generated during synth and records whether each resolved group, membership, and assignment is `created` or `existing`.
 - `cdk.json` runs the app with `python3 app.py` and writes synthesized output to `cdk.out`.
 
 ## Prerequisites
@@ -24,7 +29,7 @@ The app is intentionally scoped to Identity Center access wiring:
 - Python 3 with the dependencies in `requirements.txt`.
 - AWS CDK v2.
 - An explicit AWS profile configured locally. The app refuses to deploy with the `default` profile.
-- The deploying identity must be able to call STS, Identity Store, and SSO Admin APIs.
+- The deploying identity must be able to call STS, CloudFormation, Identity Store, and SSO Admin APIs.
 - The Identity Center instance, Identity Store users, target AWS accounts, and permission sets must already exist.
 
 Install the Python dependencies from this directory:
@@ -228,7 +233,6 @@ Supported context keys:
 - `sso_instance_arn`
 - `groups`
 - `config_path`
-- `state_path`
 - `stack_name`
 
 If `config_path` is relative, it is resolved from this directory.
@@ -253,13 +257,15 @@ The app uses `BootstraplessSynthesizer`, so it does not require CDK bootstrap as
 
 ## Resource Resolution
 
-Before the stack is created, the app checks the current Identity Center state:
+Before the stack is created, the app checks both CloudFormation stack state and current Identity Center state:
 
+- CloudFormation stack state is the ownership source.
+- AWS Identity Center is the actual state.
 - If a configured group display name does not exist, CloudFormation creates it.
 - If exactly one configured group display name exists, the stack references that group ID.
 - If multiple groups match the same display name, deployment is aborted.
-- If a configured membership or assignment already exists and `state.json` does not record it as CloudFormation-created, the stack references it.
-- If `state.json` records a configured membership or assignment as `created`, the stack keeps the CloudFormation resource in the template even when AWS now reports that it exists.
+- If a configured membership or assignment already exists but its logical resource is not in the CloudFormation stack, the stack references it.
+- If a configured membership or assignment is already in the CloudFormation stack, the stack keeps the CloudFormation resource in the template while it remains in config.
 
 CloudFormation outputs include group IDs, membership IDs, account assignment details, and whether each item was `created` or `existing`.
 
@@ -274,7 +280,7 @@ Created groups are given a `RETAIN` removal policy.
 - Removing a CloudFormation-created group from config removes it from the stack, but the physical Identity Center group remains because groups use `RemovalPolicy.RETAIN`.
 - Removing an externally managed group, membership, or assignment from config has no delete effect because it was never emitted as a CloudFormation resource.
 
-Ownership is persisted in `state.json`. Entries with `source: "created"` are treated as CloudFormation-owned on later synths. Entries with `source: "existing"` remain reference-only. If the state file is malformed, has an unsupported source, or says a resource was external but AWS no longer has it, the app aborts before deployment.
+No local state files are used. Ownership is read from CloudFormation with `list-stack-resources`, so the behavior is the same across operators, machines, and repository clones.
 
 ## Drift Detection
 
@@ -298,6 +304,7 @@ The app aborts before synth/deploy when it cannot prove the deployment is safe. 
 
 - The configured AWS profile does not exist or has no credentials.
 - The active AWS account does not match `account_id`.
+- CloudFormation stack resources cannot be read.
 - A configured Identity Store user or permission set cannot be found.
 - A username, email, group display name, membership, or permission set lookup returns multiple matches.
 - A group, member, or assignment entry contains unsupported fields.
