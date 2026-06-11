@@ -43,14 +43,14 @@ Required top-level fields:
 
 ```yaml
 aws_profile: admin-sso
-expected_account_id: "123456789012"
+account_id: "123456789012"
 region: eu-west-1
 identity_store_id: d-xxxxxxxxxx
 sso_instance_arn: arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
 groups: []
 ```
 
-`expected_account_id` is a safety check. During synth or deploy, the app calls STS using `aws_profile` and aborts if the active account does not match this value.
+`account_id` is a safety check and the CDK target account. During synth or deploy, the app calls STS using `aws_profile` and aborts if the active account does not match this value.
 
 Each group entry supports only `name`, `description`, `members`, and `assignments`:
 
@@ -213,7 +213,7 @@ Values in `config/config.yaml` can be overridden with CDK context:
 ```bash
 cdk synth \
   -c profile=admin-sso \
-  -c expected_account_id=123456789012 \
+  -c account_id=123456789012 \
   -c region=eu-west-1 \
   -c identity_store_id=d-xxxxxxxxxx \
   -c sso_instance_arn=arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
@@ -222,7 +222,7 @@ cdk synth \
 Supported context keys:
 
 - `profile` or `aws_profile`
-- `expected_account_id`
+- `account_id`
 - `region`
 - `identity_store_id`
 - `sso_instance_arn`
@@ -297,7 +297,7 @@ Expected behavior:
 The app aborts before synth/deploy when it cannot prove the deployment is safe. Common causes:
 
 - The configured AWS profile does not exist or has no credentials.
-- The active AWS account does not match `expected_account_id`.
+- The active AWS account does not match `account_id`.
 - A configured Identity Store user or permission set cannot be found.
 - A username, email, group display name, membership, or permission set lookup returns multiple matches.
 - A group, member, or assignment entry contains unsupported fields.

@@ -25,7 +25,7 @@ DEFAULT_CONFIG_PATH = APP_ROOT / "config" / "config.yaml"
 DEFAULT_STATE_PATH = APP_ROOT / "state.json"
 REQUIRED_CONFIG_FIELDS = (
     "aws_profile",
-    "expected_account_id",
+    "account_id",
     "region",
     "identity_store_id",
     "sso_instance_arn",
@@ -118,7 +118,7 @@ class IdentityCenterConfig:
     """Validated Identity Center deployment configuration."""
 
     aws_profile: str
-    expected_account_id: str
+    account_id: str
     region: str
     identity_store_id: str
     sso_instance_arn: str
@@ -291,7 +291,7 @@ def apply_context_overrides(app: cdk.App, config: dict[str, Any]) -> dict[str, A
     for key in (
         "aws_profile",
         "profile",
-        "expected_account_id",
+        "account_id",
         "region",
         "identity_store_id",
         "sso_instance_arn",
@@ -330,11 +330,11 @@ def validate_config(config: dict[str, Any]) -> IdentityCenterConfig:
             "deployment profile in config/config.yaml or pass one through deploy_cdk.py."
         )
 
-    expected_account_id = str(config.get("expected_account_id") or "").strip()
-    if not expected_account_id:
-        raise ConfigError("Config field 'expected_account_id' must not be empty")
-    if not expected_account_id.isdigit() or len(expected_account_id) != 12:
-        raise ConfigError("Config field 'expected_account_id' must be a 12-digit AWS account ID")
+    account_id = str(config.get("account_id") or "").strip()
+    if not account_id:
+        raise ConfigError("Config field 'account_id' must not be empty")
+    if not account_id.isdigit() or len(account_id) != 12:
+        raise ConfigError("Config field 'account_id' must be a 12-digit AWS account ID")
 
     region = config.get("region")
     if region in (None, ""):
@@ -357,7 +357,7 @@ def validate_config(config: dict[str, Any]) -> IdentityCenterConfig:
         "Configuration validation successful",
         extra={
             "aws_profile": aws_profile,
-            "expected_account_id": expected_account_id,
+            "account_id": account_id,
             "has_identity_store_id": bool(config.get("identity_store_id")),
             "has_sso_instance_arn": bool(config.get("sso_instance_arn")),
             "group_count": len(group_configs),
@@ -365,7 +365,7 @@ def validate_config(config: dict[str, Any]) -> IdentityCenterConfig:
     )
     return IdentityCenterConfig(
         aws_profile=aws_profile,
-        expected_account_id=expected_account_id,
+        account_id=account_id,
         region=str(region),
         identity_store_id=identity_store_id,
         sso_instance_arn=sso_instance_arn,
@@ -522,13 +522,13 @@ def configure_aws_environment(config: IdentityCenterConfig) -> None:
     os.environ["AWS_PROFILE"] = config.aws_profile
     os.environ["AWS_REGION"] = config.region
     os.environ["AWS_DEFAULT_REGION"] = config.region
-    os.environ["CDK_DEFAULT_ACCOUNT"] = config.expected_account_id
+    os.environ["CDK_DEFAULT_ACCOUNT"] = config.account_id
     os.environ["CDK_DEFAULT_REGION"] = config.region
     LOGGER.info(
         "AWS environment configured",
         extra={
             "aws_profile": config.aws_profile,
-            "expected_account_id": config.expected_account_id,
+            "account_id": config.account_id,
             "region": config.region,
         },
     )
@@ -553,18 +553,18 @@ def validate_aws_account(config: IdentityCenterConfig) -> dict[str, Any]:
         raise AwsAccountValidationError(
             f"ERROR: Unable to validate AWS account with STS.\n\n"
             f"Configured profile: {config.aws_profile}\n"
-            f"Expected account: {config.expected_account_id}\n"
+            f"Configured account_id: {config.account_id}\n"
             f"Region: {config.region}\n"
             f"Reason: {exc}\n\n"
             "Deployment aborted."
         ) from exc
 
     actual_account_id = str(caller.get("Account", ""))
-    if actual_account_id != config.expected_account_id:
+    if actual_account_id != config.account_id:
         raise AwsAccountValidationError(
             "ERROR: AWS account mismatch.\n\n"
             f"Configured profile: {config.aws_profile}\n"
-            f"Expected account: {config.expected_account_id}\n"
+            f"Configured account_id: {config.account_id}\n"
             f"Actual account: {actual_account_id}\n\n"
             "Deployment aborted."
         )
@@ -573,7 +573,7 @@ def validate_aws_account(config: IdentityCenterConfig) -> dict[str, Any]:
         "AWS account validation successful",
         extra={
             "aws_profile": config.aws_profile,
-            "expected_account_id": config.expected_account_id,
+            "account_id": config.account_id,
             "actual_account_id": actual_account_id,
         },
     )
@@ -1309,7 +1309,7 @@ def main() -> None:
         app,
         stack_name,
         config=config,
-        env=cdk.Environment(account=config.expected_account_id, region=config.region),
+        env=cdk.Environment(account=config.account_id, region=config.region),
         synthesizer=cdk.BootstraplessSynthesizer(),
     )
     LOGGER.info("Stack instantiated", extra={"stack_name": stack_name})
