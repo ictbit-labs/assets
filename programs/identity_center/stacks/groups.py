@@ -7,7 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 import aws_cdk as cdk
-from aws_cdk import CfnOutput, RemovalPolicy
+from aws_cdk import CfnOutput
 from aws_cdk import aws_identitystore as identitystore
 from aws_cdk import aws_sso as sso
 from constructs import Construct
@@ -90,7 +90,7 @@ class IdentityCenterGroupsStack(cdk.Stack):
         )
 
     def _create_or_reference_group(self, group: "ResolvedGroupConfig") -> None:
-        """Create new groups and reference existing groups resolved by app.py."""
+        """Create stack-owned groups and reference external groups resolved by app.py."""
 
         group_source = getattr(group, "source", "")
         if group_source == "created":
@@ -131,13 +131,12 @@ class IdentityCenterGroupsStack(cdk.Stack):
             resource_id,
             **group_properties,
         )
-        cfn_group.apply_removal_policy(RemovalPolicy.RETAIN)
         self.identity_store_groups.append(cfn_group)
         LOGGER.info("Creating Identity Center group", extra={"group_name": group.name})
         return cfn_group.attr_group_id
 
     def _create_or_reference_group_memberships(self, group: "ResolvedGroupConfig") -> None:
-        """Create new memberships and reference existing memberships."""
+        """Create stack-owned memberships and reference external memberships."""
 
         group_id = self.group_ids_by_name[group.name]
         for membership in group.members or []:
@@ -204,7 +203,7 @@ class IdentityCenterGroupsStack(cdk.Stack):
         return cfn_membership.attr_membership_id
 
     def _create_or_reference_group_assignments(self, group: "ResolvedGroupConfig") -> None:
-        """Create new account assignments and reference existing assignments."""
+        """Create stack-owned account assignments and reference external assignments."""
 
         group_id = self.group_ids_by_name[group.name]
         for assignment in group.assignments or []:

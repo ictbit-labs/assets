@@ -9,13 +9,14 @@ The app is intentionally scoped to Identity Center access wiring:
 - It can create missing account assignments for existing AWS accounts and permission sets.
 - It never creates Identity Store users, AWS accounts, or permission sets.
 - It references existing matching groups, memberships, and assignments instead of recreating them.
-- It keeps CloudFormation-created memberships and assignments in the template until they are removed from `config/config.yaml`.
+- It keeps CloudFormation-created resources in the template until they are removed from `config/config.yaml`.
 
 State model:
 
-- `config/config.yaml` is the desired state.
+- `config/config.yaml` is the single source of truth for resources owned by this CloudFormation stack.
 - CloudFormation stack resources are the ownership state.
 - AWS Identity Center is the actual state.
+- Resources that existed before this stack remain external unless CloudFormation already owns their logical resource.
 
 ## Files
 
@@ -265,11 +266,19 @@ Before the stack is created, the app checks both CloudFormation stack state and 
 - If exactly one configured group display name exists, the stack references that group ID.
 - If multiple groups match the same display name, deployment is aborted.
 - If a configured membership or assignment already exists but its logical resource is not in the CloudFormation stack, the stack references it.
-- If a configured membership or assignment is already in the CloudFormation stack, the stack keeps the CloudFormation resource in the template while it remains in config.
+- If a configured group, membership, or assignment is already in the CloudFormation stack, the stack keeps the CloudFormation resource in the template while it remains in config.
 
 CloudFormation outputs include group IDs, membership IDs, account assignment details, and whether each item was `created` or `existing`.
 
-Created groups are given a `RETAIN` removal policy.
+## External Resource Protection
+
+Existing Identity Center resources are reference-only unless CloudFormation stack state shows that this stack owns them:
+
+- Existing groups are resolved and used by ID, but no `AWS::IdentityStore::Group` is synthesized for them.
+- Existing memberships are resolved and exposed in outputs, but no `AWS::IdentityStore::GroupMembership` is synthesized for them.
+- Existing assignments are resolved and exposed in outputs, but no `AWS::SSO::Assignment` is synthesized for them.
+- Removing an external resource from config only removes the reference and outputs from this stack.
+- External resources are never automatically adopted, updated, deleted, replaced, or taken over by CloudFormation.
 
 ## Lifecycle Management
 
@@ -277,14 +286,18 @@ Created groups are given a `RETAIN` removal policy.
 
 - Removing a CloudFormation-created membership from config removes it from the template, so CloudFormation deletes the membership from AWS.
 - Removing a CloudFormation-created assignment from config removes it from the template, so CloudFormation deletes the assignment from AWS.
-- Removing a CloudFormation-created group from config removes it from the stack, but the physical Identity Center group remains because groups use `RemovalPolicy.RETAIN`.
-- Removing an externally managed group, membership, or assignment from config has no delete effect because it was never emitted as a CloudFormation resource.
+- Removing a CloudFormation-created group from config removes it from the template, so CloudFormation deletes the group from AWS.
+- Changing a CloudFormation-created group description updates the group in AWS.
+- Changing a managed membership or assignment is represented as removing the old relationship and creating the new one.
+- Removing an externally managed group, membership, or assignment from config has no delete effect because no CloudFormation resource was emitted for it.
 
 No local state files are used. Ownership is read from CloudFormation with `list-stack-resources`, so the behavior is the same across operators, machines, and repository clones.
 
+During synth/deploy the app logs planned `CREATE`, `UPDATE`, and `DELETE` actions before the stack is created.
+
 ## Drift Detection
 
-CloudFormation is the desired state for memberships and assignments created by this stack. To check drift:
+CloudFormation is the desired state for groups, memberships, and assignments created by this stack. To check drift:
 
 ```bash
 aws cloudformation detect-stack-drift --stack-name <stack-name>
@@ -294,6 +307,7 @@ aws cloudformation describe-stack-resource-drifts --stack-name <stack-name>
 
 Expected behavior:
 
+- If a CloudFormation-managed group is manually changed or removed, drift should be detected.
 - If a CloudFormation-managed group membership is manually removed, drift should be detected.
 - If a CloudFormation-managed account assignment is manually removed, drift should be detected.
 - Existing groups, memberships, and assignments that are referenced but not created by this stack may not be fully drift-managed by CloudFormation.

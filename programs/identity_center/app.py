@@ -107,6 +107,7 @@ class ResolvedGroupConfig:
     description: str
     source: str
     group_id: str | None = None
+    current_description: str | None = None
     members: list[ResolvedMembershipConfig] | None = None
     assignments: list[ResolvedAssignmentConfig] | None = None
 
@@ -133,6 +134,15 @@ class StackResourceOwnership:
         """Return whether CloudFormation stack state contains the logical resource."""
 
         return (resource_type, logical_resource_id) in self.resources
+
+
+@dataclass(frozen=True)
+class PlannedChanges:
+    """Human-readable deployment plan summary."""
+
+    creates: list[str]
+    updates: list[str]
+    deletes: list[str]
 
 
 def configure_logging() -> None:
@@ -676,6 +686,7 @@ def resolve_identity_center_group(
             f"Identity Store ID: {identity_store_id}\n\n"
             "Deployment aborted."
         )
+    current_description = str(matches[0].get("Description") or "").strip()
 
     group_source = "created" if cfn_owns_group else "existing"
     LOGGER.info(
@@ -709,6 +720,7 @@ def resolve_identity_center_group(
         description=group.description,
         source=group_source,
         group_id=group_id,
+        current_description=current_description,
         members=resolved_members,
         assignments=resolved_assignments,
     )
@@ -1160,6 +1172,111 @@ def list_account_assignments_for_group(
     return matches
 
 
+def log_planned_changes(
+    resolved_groups: list[ResolvedGroupConfig],
+    ownership: StackResourceOwnership,
+) -> None:
+    """Log create/update/delete actions implied by config and stack ownership."""
+
+    plan = build_planned_changes(resolved_groups, ownership)
+    LOGGER.info(
+        "Planned Identity Center changes",
+        extra={
+            "create_count": len(plan.creates),
+            "update_count": len(plan.updates),
+            "delete_count": len(plan.deletes),
+        },
+    )
+    log_plan_section("CREATE", plan.creates)
+    log_plan_section("UPDATE", plan.updates)
+    log_plan_section("DELETE", plan.deletes)
+
+    if not plan.creates and not plan.updates and not plan.deletes:
+        LOGGER.info("No planned CloudFormation-owned resource changes detected")
+
+
+def build_planned_changes(
+    resolved_groups: list[ResolvedGroupConfig],
+    ownership: StackResourceOwnership,
+) -> PlannedChanges:
+    """Build a human-readable plan from desired config and stack resources."""
+
+    creates: list[str] = []
+    updates: list[str] = []
+    desired_managed_resources: dict[tuple[str, str], str] = {}
+
+    for group in resolved_groups:
+        group_logical_id = group_resource_id(group.name)
+        group_resource = ("AWS::IdentityStore::Group", group_logical_id)
+        if group.source == "created":
+            desired_managed_resources[group_resource] = f"Group {group.name}"
+            if not ownership.owns(*group_resource):
+                creates.append(f"Group {group.name}")
+            elif (group.current_description or "") != group.description:
+                updates.append(f"Group {group.name}")
+
+        for membership in group.members or []:
+            member_label = membership.username or membership.email or membership.user_id
+            membership_logical_id = membership_resource_id(group.name, member_label)
+            membership_resource = ("AWS::IdentityStore::GroupMembership", membership_logical_id)
+            if membership.source == "created":
+                label = f"Membership {group.name} -> {member_label}"
+                desired_managed_resources[membership_resource] = label
+                if not ownership.owns(*membership_resource):
+                    creates.append(label)
+
+        for assignment in group.assignments or []:
+            permission_label = assignment.permission_set_name or assignment.permission_set_arn
+            assignment_logical_id = assignment_resource_id(
+                group.name,
+                assignment.account_id,
+                permission_label,
+            )
+            assignment_resource = ("AWS::SSO::Assignment", assignment_logical_id)
+            if assignment.source == "created":
+                label = f"Assignment {group.name} -> {permission_label} ({assignment.account_id})"
+                desired_managed_resources[assignment_resource] = label
+                if not ownership.owns(*assignment_resource):
+                    creates.append(label)
+
+    deletes = [
+        deletion_label(resource_type, logical_id)
+        for resource_type, logical_id in sorted(ownership.resources)
+        if resource_type
+        in {
+            "AWS::IdentityStore::Group",
+            "AWS::IdentityStore::GroupMembership",
+            "AWS::SSO::Assignment",
+        }
+        and (resource_type, logical_id) not in desired_managed_resources
+    ]
+
+    return PlannedChanges(creates=creates, updates=updates, deletes=deletes)
+
+
+def deletion_label(resource_type: str, logical_id: str) -> str:
+    """Return a readable delete label for a CloudFormation-owned resource."""
+
+    resource_name = {
+        "AWS::IdentityStore::Group": "Group",
+        "AWS::IdentityStore::GroupMembership": "Membership",
+        "AWS::SSO::Assignment": "Assignment",
+    }.get(resource_type, resource_type)
+    return f"{resource_name} {logical_id}"
+
+
+def log_plan_section(section_name: str, changes: list[str]) -> None:
+    """Log one plan section with stable formatting."""
+
+    if not changes:
+        LOGGER.info("%s: none", section_name)
+        return
+
+    LOGGER.info("%s:", section_name)
+    for change in changes:
+        LOGGER.info("- %s", change)
+
+
 def main() -> None:
     """Create and synthesize the Identity Center CDK app."""
 
@@ -1180,6 +1297,7 @@ def main() -> None:
     stack_name = context_value(app, "stack_name") or "IdentityCenterGroupsStack"
     ownership = load_stack_resource_ownership(config, stack_name=stack_name)
     config = resolve_identity_center_groups(config, ownership=ownership)
+    log_planned_changes(config.groups, ownership)
     IdentityCenterGroupsStack(
         app,
         stack_name,
