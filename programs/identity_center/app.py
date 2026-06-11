@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -21,6 +22,7 @@ from stacks.groups import IdentityCenterGroupsStack
 LOGGER = logging.getLogger("identity_center.app")
 APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = APP_ROOT / "config" / "config.yaml"
+DEFAULT_STATE_PATH = APP_ROOT / "state.json"
 REQUIRED_CONFIG_FIELDS = (
     "aws_profile",
     "expected_account_id",
@@ -44,6 +46,10 @@ class IdentityStoreGroupResolutionError(RuntimeError):
 
 class IdentityCenterResolutionError(RuntimeError):
     """Raised when memberships or assignments cannot be resolved safely."""
+
+
+class OwnershipStateError(RuntimeError):
+    """Raised when persisted ownership state is invalid or unsafe."""
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,15 @@ class IdentityCenterConfig:
     groups: list[GroupConfig | ResolvedGroupConfig]
 
 
+@dataclass(frozen=True)
+class OwnershipState:
+    """Persisted source-of-truth ownership state for resolved resources."""
+
+    groups: dict[str, dict[str, Any]]
+    memberships: dict[str, dict[str, Any]]
+    assignments: dict[str, dict[str, Any]]
+
+
 def configure_logging() -> None:
     """Configure structured, concise logging for synth/deploy output."""
 
@@ -159,6 +174,114 @@ def load_config(config_path: Path) -> dict[str, Any]:
 
     LOGGER.info("Configuration loaded", extra={"config_path": str(config_path)})
     return raw_config
+
+
+def load_ownership_state(state_path: Path) -> OwnershipState:
+    """Load persisted CloudFormation ownership state from disk."""
+
+    if not state_path.exists():
+        LOGGER.info("Ownership state file does not exist yet", extra={"state_path": str(state_path)})
+        return OwnershipState(groups={}, memberships={}, assignments={})
+
+    LOGGER.info("Loading ownership state", extra={"state_path": str(state_path)})
+    try:
+        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise OwnershipStateError(
+            f"ERROR: Ownership state file is not valid JSON.\n\n"
+            f"State path: {state_path}\n"
+            f"Reason: {exc}\n\n"
+            "Deployment aborted."
+        ) from exc
+
+    if not isinstance(raw_state, dict):
+        raise OwnershipStateError(
+            f"ERROR: Ownership state file must contain a JSON object.\n\nState path: {state_path}"
+        )
+
+    return OwnershipState(
+        groups=validate_ownership_state_section(raw_state, "groups", state_path),
+        memberships=validate_ownership_state_section(raw_state, "memberships", state_path),
+        assignments=validate_ownership_state_section(raw_state, "assignments", state_path),
+    )
+
+
+def validate_ownership_state_section(
+    raw_state: dict[str, Any],
+    section_name: str,
+    state_path: Path,
+) -> dict[str, dict[str, Any]]:
+    """Validate one ownership state resource section."""
+
+    section = raw_state.get(section_name, {})
+    if not isinstance(section, dict):
+        raise OwnershipStateError(
+            f"ERROR: Ownership state section '{section_name}' must be a JSON object.\n\n"
+            f"State path: {state_path}"
+        )
+
+    validated: dict[str, dict[str, Any]] = {}
+    for key, value in section.items():
+        if not isinstance(key, str) or not key:
+            raise OwnershipStateError(
+                f"ERROR: Ownership state section '{section_name}' contains an invalid key.\n\n"
+                f"State path: {state_path}"
+            )
+        if not isinstance(value, dict):
+            raise OwnershipStateError(
+                f"ERROR: Ownership state entry '{section_name}.{key}' must be a JSON object.\n\n"
+                f"State path: {state_path}"
+            )
+
+        source = value.get("source")
+        if source not in {"created", "existing"}:
+            raise OwnershipStateError(
+                f"ERROR: Ownership state entry '{section_name}.{key}' must have "
+                "source set to 'created' or 'existing'.\n\n"
+                f"State path: {state_path}\n"
+                f"Actual source: {source!r}\n\n"
+                "Deployment aborted."
+            )
+        validated[key] = dict(value)
+
+    return validated
+
+
+def write_ownership_state(state_path: Path, state: OwnershipState) -> None:
+    """Persist refreshed ownership state atomically."""
+
+    rendered_state = {
+        "version": 1,
+        "groups": state.groups,
+        "memberships": state.memberships,
+        "assignments": state.assignments,
+    }
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(rendered_state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(state_path)
+    LOGGER.info("Ownership state written", extra={"state_path": str(state_path)})
+
+
+def group_state_key(group_name: str) -> str:
+    """Return the ownership state key for a group."""
+
+    return group_name
+
+
+def membership_state_key(group_name: str, user_id: str) -> str:
+    """Return the ownership state key for a group membership."""
+
+    return f"{group_name}:{user_id}"
+
+
+def assignment_state_key(group_name: str, account_id: str, permission_set_arn: str) -> str:
+    """Return the ownership state key for an account assignment."""
+
+    return f"{group_name}:{account_id}:{permission_set_arn}"
 
 
 def apply_context_overrides(app: cdk.App, config: dict[str, Any]) -> dict[str, Any]:
@@ -457,11 +580,17 @@ def validate_aws_account(config: IdentityCenterConfig) -> dict[str, Any]:
     return caller
 
 
-def resolve_identity_center_groups(config: IdentityCenterConfig) -> IdentityCenterConfig:
+def resolve_identity_center_groups(
+    config: IdentityCenterConfig,
+    *,
+    state: OwnershipState,
+    state_path: Path,
+) -> IdentityCenterConfig:
     """Resolve groups, memberships, and assignments before stack resource creation."""
 
     if not config.groups:
         LOGGER.info("No Identity Center groups configured")
+        write_ownership_state(state_path, OwnershipState(groups={}, memberships={}, assignments={}))
         return config
 
     LOGGER.info(
@@ -479,6 +608,7 @@ def resolve_identity_center_groups(config: IdentityCenterConfig) -> IdentityCent
                 identity_store_id=config.identity_store_id,
                 sso_instance_arn=config.sso_instance_arn,
                 group=group,
+                state=state,
             )
             for group in config.groups
         ]
@@ -497,6 +627,7 @@ def resolve_identity_center_groups(config: IdentityCenterConfig) -> IdentityCent
         "Identity Center group resolution complete",
         extra={"created_count": created_count, "existing_count": existing_count},
     )
+    write_ownership_state(state_path, build_ownership_state(resolved_groups))
     return replace(config, groups=resolved_groups)
 
 
@@ -507,6 +638,7 @@ def resolve_identity_center_group(
     identity_store_id: str,
     sso_instance_arn: str,
     group: GroupConfig | ResolvedGroupConfig,
+    state: OwnershipState,
 ) -> ResolvedGroupConfig:
     """Resolve a desired group and its child resources."""
 
@@ -516,7 +648,20 @@ def resolve_identity_center_group(
         display_name=group.name,
     )
 
+    group_key = group_state_key(group.name)
+    state_source = state.groups.get(group_key, {}).get("source")
+
     if not matches:
+        if state_source == "existing":
+            raise OwnershipStateError(
+                "ERROR: A previously external Identity Center group is missing.\n\n"
+                f"Group name: {group.name}\n"
+                f"Identity Store ID: {identity_store_id}\n\n"
+                "The state file records this group as source=existing, so the stack "
+                "will not adopt it automatically. Remove the stale state entry or "
+                "recreate the external group before deploying."
+            )
+
         LOGGER.info("Identity Center group will be created", extra={"group_name": group.name})
         resolved_members = [
             resolve_group_membership(
@@ -525,6 +670,7 @@ def resolve_identity_center_group(
                 group_name=group.name,
                 group_id=None,
                 member=member,
+                state=state,
             )
             for member in group.members
         ]
@@ -535,6 +681,7 @@ def resolve_identity_center_group(
                 group_name=group.name,
                 group_id=None,
                 assignment=assignment,
+                state=state,
             )
             for assignment in group.assignments
         ]
@@ -565,9 +712,10 @@ def resolve_identity_center_group(
             "Deployment aborted."
         )
 
+    group_source = "created" if state_source == "created" else "existing"
     LOGGER.info(
         "Identity Center group already exists",
-        extra={"group_name": group.name, "group_id": group_id},
+        extra={"group_name": group.name, "group_id": group_id, "source": group_source},
     )
     resolved_members = [
         resolve_group_membership(
@@ -576,6 +724,7 @@ def resolve_identity_center_group(
             group_name=group.name,
             group_id=group_id,
             member=member,
+            state=state,
         )
         for member in group.members
     ]
@@ -586,13 +735,14 @@ def resolve_identity_center_group(
             group_name=group.name,
             group_id=group_id,
             assignment=assignment,
+            state=state,
         )
         for assignment in group.assignments
     ]
     return ResolvedGroupConfig(
         name=group.name,
         description=group.description,
-        source="existing",
+        source=group_source,
         group_id=group_id,
         members=resolved_members,
         assignments=resolved_assignments,
@@ -627,6 +777,7 @@ def resolve_group_membership(
     group_name: str,
     group_id: str | None,
     member: MemberConfig,
+    state: OwnershipState,
 ) -> ResolvedMembershipConfig:
     """Resolve a desired group membership to create or existing."""
 
@@ -639,7 +790,19 @@ def resolve_group_membership(
             "Deployment aborted."
         )
 
+    membership_key = membership_state_key(group_name, user_id)
+    state_source = state.memberships.get(membership_key, {}).get("source")
+
     if group_id is None:
+        if state_source == "existing":
+            raise OwnershipStateError(
+                "ERROR: A previously external Identity Center group membership cannot be resolved.\n\n"
+                f"Group name: {group_name}\n"
+                f"User ID: {user_id}\n\n"
+                "The state file records this membership as source=existing, but the group "
+                "is being created by the stack. Deployment aborted."
+            )
+
         LOGGER.info(
             "Identity Center group membership will be created",
             extra={"group_name": group_name, "user_id": user_id},
@@ -657,18 +820,6 @@ def resolve_group_membership(
         group_id=group_id,
         user_id=user_id,
     )
-    if not matches:
-        LOGGER.info(
-            "Identity Center group membership will be created",
-            extra={"group_name": group_name, "group_id": group_id, "user_id": user_id},
-        )
-        return ResolvedMembershipConfig(
-            user_id=user_id,
-            source="created",
-            username=member.username,
-            email=member.email,
-        )
-
     if len(matches) > 1:
         membership_ids = ", ".join(str(match.get("MembershipId", "")) for match in matches)
         raise IdentityCenterResolutionError(
@@ -678,6 +829,48 @@ def resolve_group_membership(
             f"User ID: {user_id}\n"
             f"Matching membership IDs: {membership_ids}\n\n"
             "Deployment aborted."
+        )
+
+    if state_source == "created":
+        membership_id = str(matches[0].get("MembershipId") or "") if matches else None
+        LOGGER.info(
+            "Identity Center group membership is CloudFormation-owned",
+            extra={
+                "group_name": group_name,
+                "group_id": group_id,
+                "user_id": user_id,
+                "membership_id": membership_id,
+            },
+        )
+        return ResolvedMembershipConfig(
+            user_id=user_id,
+            source="created",
+            membership_id=membership_id,
+            username=member.username,
+            email=member.email,
+        )
+
+    if not matches:
+        if state_source == "existing":
+            raise OwnershipStateError(
+                "ERROR: A previously external Identity Center group membership is missing.\n\n"
+                f"Group name: {group_name}\n"
+                f"Group ID: {group_id}\n"
+                f"User ID: {user_id}\n\n"
+                "The state file records this membership as source=existing, so the stack "
+                "will not adopt it automatically. Remove the stale state entry or recreate "
+                "the external membership before deploying."
+            )
+
+        LOGGER.info(
+            "Identity Center group membership will be created",
+            extra={"group_name": group_name, "group_id": group_id, "user_id": user_id},
+        )
+        return ResolvedMembershipConfig(
+            user_id=user_id,
+            source="created",
+            username=member.username,
+            email=member.email,
         )
 
     membership_id = str(matches[0].get("MembershipId") or "")
@@ -829,6 +1022,7 @@ def resolve_group_assignment(
     group_name: str,
     group_id: str | None,
     assignment: AssignmentConfig,
+    state: OwnershipState,
 ) -> ResolvedAssignmentConfig:
     """Resolve a desired account assignment to create or existing."""
 
@@ -838,7 +1032,20 @@ def resolve_group_assignment(
         assignment=assignment,
     )
 
+    assignment_key = assignment_state_key(group_name, assignment.account_id, permission_set_arn)
+    state_source = state.assignments.get(assignment_key, {}).get("source")
+
     if group_id is None:
+        if state_source == "existing":
+            raise OwnershipStateError(
+                "ERROR: A previously external Identity Center account assignment cannot be resolved.\n\n"
+                f"Group name: {group_name}\n"
+                f"Account ID: {assignment.account_id}\n"
+                f"Permission set ARN: {permission_set_arn}\n\n"
+                "The state file records this assignment as source=existing, but the group "
+                "is being created by the stack. Deployment aborted."
+            )
+
         LOGGER.info(
             "Identity Center account assignment will be created",
             extra={"group_name": group_name, "account_id": assignment.account_id},
@@ -857,9 +1064,19 @@ def resolve_group_assignment(
         permission_set_arn=permission_set_arn,
         group_id=group_id,
     )
-    if not matches:
+    if len(matches) > 1:
+        raise IdentityCenterResolutionError(
+            "ERROR: Duplicate Identity Center account assignments found.\n\n"
+            f"Group name: {group_name}\n"
+            f"Group ID: {group_id}\n"
+            f"Account ID: {assignment.account_id}\n"
+            f"Permission set ARN: {permission_set_arn}\n\n"
+            "Deployment aborted."
+        )
+
+    if state_source == "created":
         LOGGER.info(
-            "Identity Center account assignment will be created",
+            "Identity Center account assignment is CloudFormation-owned",
             extra={
                 "group_name": group_name,
                 "group_id": group_id,
@@ -874,14 +1091,33 @@ def resolve_group_assignment(
             source="created",
         )
 
-    if len(matches) > 1:
-        raise IdentityCenterResolutionError(
-            "ERROR: Duplicate Identity Center account assignments found.\n\n"
-            f"Group name: {group_name}\n"
-            f"Group ID: {group_id}\n"
-            f"Account ID: {assignment.account_id}\n"
-            f"Permission set ARN: {permission_set_arn}\n\n"
-            "Deployment aborted."
+    if not matches:
+        if state_source == "existing":
+            raise OwnershipStateError(
+                "ERROR: A previously external Identity Center account assignment is missing.\n\n"
+                f"Group name: {group_name}\n"
+                f"Group ID: {group_id}\n"
+                f"Account ID: {assignment.account_id}\n"
+                f"Permission set ARN: {permission_set_arn}\n\n"
+                "The state file records this assignment as source=existing, so the stack "
+                "will not adopt it automatically. Remove the stale state entry or recreate "
+                "the external assignment before deploying."
+            )
+
+        LOGGER.info(
+            "Identity Center account assignment will be created",
+            extra={
+                "group_name": group_name,
+                "group_id": group_id,
+                "account_id": assignment.account_id,
+                "permission_set_arn": permission_set_arn,
+            },
+        )
+        return ResolvedAssignmentConfig(
+            account_id=assignment.account_id,
+            permission_set_arn=permission_set_arn,
+            permission_set_name=permission_set_name,
+            source="created",
         )
 
     LOGGER.info(
@@ -995,6 +1231,56 @@ def list_account_assignments_for_group(
     return matches
 
 
+def build_ownership_state(resolved_groups: list[ResolvedGroupConfig]) -> OwnershipState:
+    """Build persisted ownership state from resolved desired resources."""
+
+    groups: dict[str, dict[str, Any]] = {}
+    memberships: dict[str, dict[str, Any]] = {}
+    assignments: dict[str, dict[str, Any]] = {}
+
+    for group in resolved_groups:
+        group_entry: dict[str, Any] = {
+            "source": group.source,
+            "description": group.description,
+        }
+        if group.group_id:
+            group_entry["group_id"] = group.group_id
+        groups[group_state_key(group.name)] = group_entry
+
+        for membership in group.members or []:
+            membership_entry: dict[str, Any] = {
+                "source": membership.source,
+                "group_name": group.name,
+                "user_id": membership.user_id,
+            }
+            if membership.membership_id:
+                membership_entry["membership_id"] = membership.membership_id
+            if membership.username:
+                membership_entry["username"] = membership.username
+            if membership.email:
+                membership_entry["email"] = membership.email
+            memberships[membership_state_key(group.name, membership.user_id)] = membership_entry
+
+        for assignment in group.assignments or []:
+            assignment_entry: dict[str, Any] = {
+                "source": assignment.source,
+                "group_name": group.name,
+                "account_id": assignment.account_id,
+                "permission_set_arn": assignment.permission_set_arn,
+            }
+            if assignment.permission_set_name:
+                assignment_entry["permission_set_name"] = assignment.permission_set_name
+            assignments[
+                assignment_state_key(
+                    group.name,
+                    assignment.account_id,
+                    assignment.permission_set_arn,
+                )
+            ] = assignment_entry
+
+    return OwnershipState(groups=groups, memberships=memberships, assignments=assignments)
+
+
 def main() -> None:
     """Create and synthesize the Identity Center CDK app."""
 
@@ -1008,11 +1294,17 @@ def main() -> None:
 
     raw_config = load_config(config_path)
     config = validate_config(apply_context_overrides(app, raw_config))
+    state_path_context = context_value(app, "state_path")
+    state_path = Path(state_path_context) if state_path_context else DEFAULT_STATE_PATH
+    if not state_path.is_absolute():
+        state_path = APP_ROOT / state_path
+    state = load_ownership_state(state_path)
+
     configure_aws_environment(config)
     validate_aws_account(config)
-    config = resolve_identity_center_groups(config)
 
     stack_name = context_value(app, "stack_name") or "IdentityCenterGroupsStack"
+    config = resolve_identity_center_groups(config, state=state, state_path=state_path)
     IdentityCenterGroupsStack(
         app,
         stack_name,
@@ -1034,6 +1326,7 @@ if __name__ == "__main__":
         AwsAccountValidationError,
         IdentityStoreGroupResolutionError,
         IdentityCenterResolutionError,
+        OwnershipStateError,
     ) as exc:
         LOGGER.error("%s", exc)
         sys.exit(1)

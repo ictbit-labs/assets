@@ -9,12 +9,14 @@ The app is intentionally scoped to Identity Center access wiring:
 - It can create missing account assignments for existing AWS accounts and permission sets.
 - It never creates Identity Store users, AWS accounts, or permission sets.
 - It references existing matching groups, memberships, and assignments instead of recreating them.
+- It keeps CloudFormation-created memberships and assignments in the template until they are removed from `config/config.yaml`.
 
 ## Files
 
 - `app.py` loads and validates configuration, validates the selected AWS account with STS, resolves Identity Center resources, and synthesizes the stack.
 - `stacks/groups.py` defines the CloudFormation resources and outputs.
 - `config/config.yaml` is the default deployment configuration.
+- `state.json` is generated during synth and records whether each resolved group, membership, and assignment is `created` or `existing`.
 - `cdk.json` runs the app with `python3 app.py` and writes synthesized output to `cdk.out`.
 
 ## Prerequisites
@@ -226,6 +228,7 @@ Supported context keys:
 - `sso_instance_arn`
 - `groups`
 - `config_path`
+- `state_path`
 - `stack_name`
 
 If `config_path` is relative, it is resolved from this directory.
@@ -255,12 +258,23 @@ Before the stack is created, the app checks the current Identity Center state:
 - If a configured group display name does not exist, CloudFormation creates it.
 - If exactly one configured group display name exists, the stack references that group ID.
 - If multiple groups match the same display name, deployment is aborted.
-- If a configured membership already exists for the resolved group and user, the stack references it.
-- If a configured account assignment already exists for the resolved group, account, and permission set, the stack references it.
+- If a configured membership or assignment already exists and `state.json` does not record it as CloudFormation-created, the stack references it.
+- If `state.json` records a configured membership or assignment as `created`, the stack keeps the CloudFormation resource in the template even when AWS now reports that it exists.
 
 CloudFormation outputs include group IDs, membership IDs, account assignment details, and whether each item was `created` or `existing`.
 
 Created groups are given a `RETAIN` removal policy.
+
+## Lifecycle Management
+
+`config/config.yaml` is the desired state for resources owned by this stack:
+
+- Removing a CloudFormation-created membership from config removes it from the template, so CloudFormation deletes the membership from AWS.
+- Removing a CloudFormation-created assignment from config removes it from the template, so CloudFormation deletes the assignment from AWS.
+- Removing a CloudFormation-created group from config removes it from the stack, but the physical Identity Center group remains because groups use `RemovalPolicy.RETAIN`.
+- Removing an externally managed group, membership, or assignment from config has no delete effect because it was never emitted as a CloudFormation resource.
+
+Ownership is persisted in `state.json`. Entries with `source: "created"` are treated as CloudFormation-owned on later synths. Entries with `source: "existing"` remain reference-only. If the state file is malformed, has an unsupported source, or says a resource was external but AWS no longer has it, the app aborts before deployment.
 
 ## Drift Detection
 
